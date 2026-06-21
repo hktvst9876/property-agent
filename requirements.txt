@@ -1,0 +1,13 @@
+# --- Required ---
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# --- Tests ---
+pytest>=8.0.0
+
+# --- Optional: live WhatsApp Web channel (python main.py listen, WHATSAPP_MODE=live) ---
+selenium>=4.15.0
+
+# --- Optional: only if you opt into an LLM to write messages (templates are used otherwise) ---
+# anthropic>=0.40.0
+# openai>=1.50.0
