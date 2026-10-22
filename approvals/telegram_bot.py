@@ -38,13 +38,21 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 POLL_TIMEOUT_S = 25
 
+
+def _telegram_enabled() -> bool:
+    """True only when both creds look real. Blank values OR template placeholders
+    (which contain '...') count as 'not configured', so a freshly-copied .env keeps
+    the approval gate console-only instead of crashing on a fake bot token."""
+    return bool(BOT_TOKEN and CHAT_ID
+                and "..." not in BOT_TOKEN and "..." not in CHAT_ID)
+
 # Actions with legal/financial weight — flagged louder; same tap required.
 HIGH_STAKES = {"issue_notice", "deposit_claim", "raise_rent", "non_renewal",
                "escalate_human"}
 
 
 def _check_creds() -> None:
-    if not BOT_TOKEN or not CHAT_ID:
+    if not _telegram_enabled():
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in .env")
 
 
@@ -102,7 +110,7 @@ def push_approval(approval: dict) -> None:
 def push_pending_approvals() -> int:
     """Push every pending approval. No-op (returns 0) if Telegram isn't configured,
     so the orchestrator runs fine offline."""
-    if not BOT_TOKEN or not CHAT_ID:
+    if not _telegram_enabled():
         return 0
     rows = pending_approvals()
     for row in rows:

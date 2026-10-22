@@ -19,12 +19,14 @@ from enum import Enum
 from llm.providers.base import AIProvider
 from llm.providers.anthropic_provider import ClaudeProvider
 from llm.providers.openai_provider import GPTProvider
+from llm.providers.deepseek_provider import DeepSeekProvider
 
 
 class TaskType(str, Enum):
     # ---- Locked to Claude (decision-class) ----
     DECISION = "decision"     # any verdict-adjacent reasoning (reserved)
     DRAFTING = "drafting"     # writing a message to a tenant/landlord/contractor
+    INTAKE = "intake"         # understanding an inbound message (feeds the engines)
     # ---- Open to any provider ----
     SUMMARY = "summary"       # operator-facing recap, quality-tolerant
 
@@ -32,18 +34,22 @@ class TaskType(str, Enum):
 # Provider registry — add a new vendor here.
 _REGISTRY: dict[str, AIProvider] = {
     "anthropic": ClaudeProvider(),
-    "openai": GPTProvider(),
+    "openai":    GPTProvider(),
+    "deepseek":  DeepSeekProvider(),
 }
 
 
 # Tasks that MUST go to a provider with supports_decisions=True.
-_DECISION_TASKS = {TaskType.DECISION, TaskType.DRAFTING}
+# INTAKE is decision-class: misreading a gas leak is as costly as misphrasing it,
+# so the perception layer is locked to Claude just like drafting.
+_DECISION_TASKS = {TaskType.DECISION, TaskType.DRAFTING, TaskType.INTAKE}
 
 
 # Default mapping. Override via config.PROVIDER_MAP.
 _DEFAULT_MAP: dict[TaskType, str] = {
     TaskType.DECISION: "anthropic",
     TaskType.DRAFTING: "anthropic",
+    TaskType.INTAKE:   "anthropic",
     TaskType.SUMMARY:  "anthropic",
 }
 

@@ -96,7 +96,12 @@ CLAUDE_CHEAP_MODEL = "claude-haiku-4-5-20251001"
 # provider's API key (e.g. ANTHROPIC_API_KEY); until then the drafter uses templates.
 # Decisions are always made by the deterministic engines, never a model.
 PROVIDER_MAP = {
-    "decision":   "anthropic",   # reserved (unused) — kept locked to Claude
-    "drafting":   "anthropic",   # only used if a key is set; else templates
-    "summary":    "anthropic",
+    # Swap any value to "deepseek" to route that task through DeepSeek V3 instead.
+    # Both "anthropic" and "deepseek" have supports_decisions=True so all tasks are
+    # valid on either. Mix freely, e.g. drafting->deepseek, intake->anthropic.
+    # Whichever key is absent from .env falls back to templates / keyword parser.
+    "decision":   "deepseek",    # reserved — keep as a capable model
+    "drafting":   "deepseek",    # DeepSeek V3 writes party-facing messages
+    "intake":     "deepseek",    # DeepSeek V3 understands inbound messages
+    "summary":    "deepseek",
 }

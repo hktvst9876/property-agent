@@ -9,5 +9,5 @@ pytest>=8.0.0
 selenium>=4.15.0
 
 # --- Optional: only if you opt into an LLM to write messages (templates are used otherwise) ---
-# anthropic>=0.40.0
-# openai>=1.50.0
+anthropic>=0.40.0       # for ANTHROPIC_API_KEY / Claude
+openai>=1.50.0          # for DEEPSEEK_API_KEY (DeepSeek uses the OpenAI SDK)

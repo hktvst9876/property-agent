@@ -61,8 +61,10 @@ python main.py simulate "+6592220000" "can I legally withhold rent?"   # -> refu
 
 It holds a conversation: a reply threads onto the open case instead of starting
 over, repeated chasing escalates, and one message can trigger several actions. The
-agent resolves the sender, understands the message (`core/intake_parser.py`), runs
-the right engine(s), and drafts a mood-aware reply to each party — all without a model.
+agent resolves the sender, understands the message (`llm/understand.py` when an LLM key is set, else the
+`core/intake_parser.py` keyword parser offline), runs
+the right engine(s), and drafts a reply to each party. With no API key it runs entirely
+on the keyword parser plus mood-aware templates — same verdicts, simpler wording.
 
 **Following through on its own:**
 
@@ -131,9 +133,12 @@ python main.py simulate "+6592220000" "the aircon is STILL broken, third time!! 
 ```
 
 This is keyword-based, so it catches common moods, not every nuance. If you ever
-want fully natural, LLM-written wording, set `ANTHROPIC_API_KEY` (and
-`pip install anthropic`); the drafter will use it and fall back to templates if it's
-unavailable. The engines and legal guardrail are unchanged either way.
+want fully natural, LLM-written wording (and smarter message understanding), set an
+API key: either `ANTHROPIC_API_KEY` (`pip install anthropic`) for Claude, or
+`DEEPSEEK_API_KEY` (`pip install openai` — DeepSeek is OpenAI-compatible) for DeepSeek,
+then point the tasks at it in `config.py`'s `PROVIDER_MAP`. The drafter and intake layer
+use it and fall back to templates/keywords if it's unavailable. The engines and legal
+guardrail are unchanged either way.
 
 ## Other optional toggles
 
@@ -147,14 +152,6 @@ unavailable. The engines and legal guardrail are unchanged either way.
 
 ```
 config.py          thresholds, jurisdiction, model + provider map
-core/              deterministic engines + intake_parser + legal_guard + case transitions
+core/              deterministic engines + intake_parser (offline fallback) + legal_guard + case transitions
 jurisdictions/     SG legal facts with sources (swap-in design for AU/NZ)
-llm/               router (decisions locked to Claude) + drafter + prompts
-integrations/      whatsapp (Web channel) + comms (routing) + contractors (mock)
-approvals/         Telegram one-tap approval gate
-db/                SQLite schema + helpers (the agent's memory)
-orchestrator.py    handle_inbound() (threading, multi-issue, follow-ups) + handle_event() + sweeps + listen()
-main.py            CLI (init-db, seed, simulate, listen, intake, sweep, status, bot)
-scripts/seed_demo.py
-tests/
-```
+llm/               router + understand (AI intake) + drafter + prompts + providers (

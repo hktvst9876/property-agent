@@ -33,8 +33,16 @@ _SAFETY_SIGNS = (
 
 def assess(category: str, details: str, *,
            lease_or_bylaw_breached: bool = False,
-           anonymity: bool = True) -> dict:
-    """Return {"verdict", "reason", "metrics"}."""
+           anonymity: bool = True,
+           safety_flag: bool | None = None) -> dict:
+    """Return {"verdict", "reason", "metrics"}.
+
+    safety_flag: an upstream judgement of whether a genuine safety risk is present.
+      - True/False  -> use it (e.g. from the AI intake layer, which judges meaning
+                        rather than keywords: "afraid I can't make it" is NOT a risk).
+      - None        -> fall back to the deterministic keyword scan below (offline path).
+    The engine still deterministically maps a safety risk to ESCALATE; the flag only
+    supplies the *perception*, never the verdict."""
     text = (details or "").lower()
     metrics = {
         "category": category,
@@ -42,11 +50,19 @@ def assess(category: str, details: str, *,
         "breach_flagged": bool(lease_or_bylaw_breached),
     }
 
-    for sign in _SAFETY_SIGNS:
-        if sign in text:
-            return _result(DisputeVerdict.ESCALATE, metrics,
-                f"Safety indicator '{sign}' present. Escalating to a human immediately; "
-                f"this is beyond routine complaint handling.")
+    if safety_flag is True:
+        metrics["safety_source"] = "judged"
+        return _result(DisputeVerdict.ESCALATE, metrics,
+            "A genuine safety risk was identified. Escalating to a human immediately; "
+            "this is beyond routine complaint handling.")
+
+    if safety_flag is None:
+        for sign in _SAFETY_SIGNS:
+            if sign in text:
+                metrics["safety_source"] = "keyword"
+                return _result(DisputeVerdict.ESCALATE, metrics,
+                    f"Safety indicator '{sign}' present. Escalating to a human immediately; "
+                    f"this is beyond routine complaint handling.")
 
     if lease_or_bylaw_breached:
         return _result(DisputeVerdict.NOTICE_WARRANTED, metrics,

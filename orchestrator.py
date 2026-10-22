@@ -5,7 +5,7 @@ Two entry points:
 
   handle_event(event)            — a structured situation (CLI/tests/sweeps).
   handle_inbound(from_phone, text) — a raw inbound message (WhatsApp). Resolves the
-                                     sender, understands the text (intake_parser),
+                                     sender, understands the text (llm.understand),
                                      runs the right engine, and replies on the same
                                      channel. This is the "replace me texting them"
                                      path: messages flow in and out automatically.
@@ -22,12 +22,12 @@ from datetime import datetime, timezone
 from config import JURISDICTION
 from core import (
     triage, maintenance, arrears, disputes, renewals, end_of_tenancy, cases,
-    intake_parser,
 )
 from core.legal_guard import (
     is_legal_question, refuse, surface, LegalGuardEscalation,
 )
 from llm.drafter import draft_message
+from llm.understand import understand_message
 from integrations import comms, contractors
 from db.store import (
     get_tenancy, get_property, get_party, find_contractor, prior_fault_reports,
@@ -66,7 +66,8 @@ def _send(case_id: int, party: dict | None, audience_role: str, verdict: str,
     inbound = (_INBOUND.get("message")
                if party.get("id") == _INBOUND.get("sender_id") else None)
     draft = draft_message(audience_role, verdict, reason, context=context,
-                          legal=legal, inbound_message=inbound)
+                          legal=legal, inbound_message=inbound,
+                          recipient_name=party.get("name"))
     comms.send(case_id, party, audience_role, draft["subject"], draft["body"])
 
 
@@ -99,6 +100,10 @@ def _surface_or_escalate(case_id: int, stage: str) -> dict | None:
 def _handle_maintenance(event: dict) -> dict:
     tenancy, prop, tenant, landlord = _resolve_parties(event["tenancy_id"])
     desc = event.get("description", "")
+    # Clean, agent's-POV wording for anything relayed outward (landlord/contractor).
+    # Falls back to the tenant's raw words on the offline keyword path. The raw `desc`
+    # is kept for the case record, triage, and recurrence matching below.
+    relayed = event.get("fault_summary") or desc
 
     case_id = open_case("maintenance", desc, property_id=prop["id"],
                         tenancy_id=tenancy["id"], opened_by_party_id=tenant["id"])
@@ -116,12 +121,12 @@ def _handle_maintenance(event: dict) -> dict:
     )
     verdict = decision["verdict"]
     has_media = event.get("has_media")
-    ctx = {"fault": desc, "address": prop["address"]}
+    ctx = {"fault": relayed, "address": prop["address"]}
     if has_media:
         ctx["note"] = "Tenant attached photo(s)."
 
     if verdict in ("DISPATCH", "EMERGENCY_DISPATCH", "ASSESS"):
-        fault_brief = desc + (" (tenant sent photo(s))" if has_media else "")
+        fault_brief = relayed + (" (tenant sent photo(s))" if has_media else "")
         job = contractors.dispatch(find_contractor(event.get("trade", "general")),
                                    fault=fault_brief, address=prop["address"],
                                    urgency=urg["verdict"])
@@ -145,18 +150,18 @@ def _handle_maintenance(event: dict) -> dict:
         }[verdict]
         _send(case_id, tenant, "tenant", verdict, tenant_msg, context=ctx)
         _send(case_id, landlord, "landlord", verdict, landlord_msg,
-              context={"address": prop["address"], "fault": desc})
+              context={"address": prop["address"], "fault": relayed})
         action = f"Dispatched {job['contractor']} (ref {job['reference']})."
     elif verdict == "APPROVE":
         queue_approval("approve_repair",
                        {"estimated_cost_sgd": event.get("estimated_cost_sgd"),
-                        "fault": desc, "address": prop["address"],
+                        "fault": relayed, "address": prop["address"],
                         "reason": decision["reason"]}, case_id=case_id)
         _send(case_id, landlord, "landlord", verdict, decision["reason"],
-              context={"address": prop["address"], "fault": desc})
+              context={"address": prop["address"], "fault": relayed})
         _send(case_id, tenant, "tenant", "ACKNOWLEDGED",
               "Thanks for reporting this. We've logged it and are arranging the next step.",
-              context={"fault": desc})
+              context={"fault": relayed})
         action = "Queued landlord approval for over-threshold repair."
     else:  # TENANT_RESPONSIBILITY
         _send(case_id, tenant, "tenant", verdict, decision["reason"], context=ctx)
@@ -245,6 +250,7 @@ def _handle_dispute(event: dict) -> dict:
         event.get("category", "other"), event.get("description", ""),
         lease_or_bylaw_breached=event.get("lease_or_bylaw_breached", False),
         anonymity=anonymity,
+        safety_flag=event.get("safety_flag"),
     )
     verdict = decision["verdict"]
     subject = get_party(subject_id) if subject_id else None
@@ -389,16 +395,21 @@ def _log_inbound(case_id: int, party: dict, text: str, media: dict | None) -> No
 def _event_from_intent(it: dict, tenancy: dict, party: dict, text: str,
                        has_media: bool) -> dict:
     intent, hints = it["intent"], it.get("hints", {})
+    # The AI intake writes a clean, agent's-POV one-liner per issue; we relay THAT to
+    # the landlord/contractor rather than the tenant's raw words. None on the keyword
+    # fallback, in which case the handlers use the raw text.
+    summary = it.get("summary")
     event = {"tenancy_id": tenancy["id"], "inbound": True, "has_media": has_media}
     if intent == "maintenance":
         event.update(type="maintenance", description=text,
-                     trade=hints.get("trade", "general"))
+                     trade=hints.get("trade", "general"), fault_summary=summary)
     elif intent == "arrears":
         event.update(type="arrears")
     elif intent == "dispute":
         event.update(type="dispute", description=text,
                      category=hints.get("category", "other"),
-                     complainant_party_id=party["id"], anonymity=True)
+                     complainant_party_id=party["id"], anonymity=True,
+                     fault_summary=summary, safety_flag=hints.get("safety_flag"))
     elif intent == "renewal":
         event.update(type="renewal")
     return event
@@ -433,7 +444,7 @@ def handle_inbound(from_phone: str, text: str, has_media: bool = False) -> dict:
                            {"verdict": "REFERRAL", "reason": "Legal question received.",
                             "metrics": {}}, "Referred to a professional.")
 
-        parsed = intake_parser.parse(text)
+        parsed = understand_message(text)
         engine_intents = [i for i in parsed["intents"] if i["intent"] in _HANDLERS]
         open_case_row = latest_open_case_for_tenancy(tenancy["id"]) if tenancy else None
 
@@ -509,8 +520,10 @@ def handle_followup(case: dict, party: dict, text: str, kind: str) -> dict:
                        {"reason": f"Repeated chasing on case {case_id} ({chases} chases)."},
                        case_id=case_id)
         _send(case_id, party, party["role"], "ESCALATED",
-              "Thanks for chasing, and I'm sorry for the wait. I've escalated this so it's "
-              "prioritised and someone will be in touch very shortly.")
+              f"This has been escalated after {chases} follow-ups without resolution. "
+              "A human agent will be handling this personally and will be in touch very shortly.",
+              context={"chase_count": chases, "status": "escalated",
+                       "eta": case.get("next_action_at")})
         decision = {"verdict": "ESCALATED", "reason": f"Escalated after {chases} chases.",
                     "metrics": {"chases": chases}}
         record_decision(case_id, "followup", "ESCALATED", decision["reason"], decision["metrics"])
@@ -520,11 +533,10 @@ def handle_followup(case: dict, party: dict, text: str, kind: str) -> dict:
 
     eta = case.get("next_action_at")
     status_line = case.get("next_action") or "We're on it."
-    msg = f"Thanks for checking in. {status_line}"
-    if eta:
-        msg += f" Expected by {eta}."
-    msg += " I'll update you as soon as there's progress."
-    _send(case_id, party, party["role"], "UPDATE", msg)
+    reason = f"Status update: {status_line}" + (f" ETA: {eta}." if eta else "")
+    _send(case_id, party, party["role"], "UPDATE", reason,
+          context={"chase_count": chases, "status": case["status"],
+                   "eta": eta, "next_step": status_line})
     decision = {"verdict": "UPDATE", "reason": "Sent status update to tenant.",
                 "metrics": {"chases": chases}}
     record_decision(case_id, "followup", "UPDATE", decision["reason"], decision["metrics"])

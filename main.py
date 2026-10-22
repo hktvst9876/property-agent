@@ -11,6 +11,9 @@ main.py — command-line entry point.
   python main.py bot                     # run the Telegram approval poller (needs .env)
   python main.py simulate <phone> "<text>" [--media]   # feed one inbound message
                                              # through the pipeline (offline), show the reply
+  python main.py chat [phone]            # interactive back-and-forth (safe dry-run); you
+                                         # type as a party, the agent replies. Default
+                                         # sender is the seeded tenant. /as <phone> to switch.
   python main.py listen                  # live: poll WhatsApp and auto-handle messages
                                          # (mock unless WHATSAPP_MODE=live)
 """
@@ -22,7 +25,7 @@ from pathlib import Path
 
 # Console may be cp1252 (Windows); our summaries use unicode (arrows, emoji that
 # also go to Telegram). Encode console output as UTF-8 so printing never crashes.
-for _stream in (sys.stdout, sys.stderr):
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
@@ -104,6 +107,51 @@ def _cmd_simulate(phone: str, text: str, has_media: bool = False) -> None:
             print(f"    {line}")
 
 
+def _cmd_chat(phone: str | None = None) -> None:
+    """Interactive mock conversation. You type as a party; the agent replies. Always
+    dry-run (nothing is sent to a real person), so it's safe to experiment freely."""
+    from orchestrator import handle_inbound
+    from db.store import find_party_by_phone
+
+    phone = phone or "+6592220000"   # default to the seeded tenant (Aisha Rahman)
+
+    def _who(p: str) -> str:
+        party = find_party_by_phone(p)
+        return f"{party['name']} ({party['role']})" if party else f"unknown sender {p}"
+
+    print(f"\n  Interactive chat — you are texting AS: {_who(phone)}")
+    print("  Type a message and press Enter to send it to the agent.")
+    print("  Commands:  /as <phone>  switch who you're texting as   |   /quit  exit\n")
+
+    while True:
+        try:
+            text = input("  you> ").lstrip("﻿").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  (ended)")
+            return
+        if not text:
+            continue
+        if text in ("/quit", "/exit"):
+            print("  (ended)")
+            return
+        if text.startswith("/as "):
+            phone = text[4:].strip()
+            print(f"  [now texting as: {_who(phone)}]\n")
+            continue
+
+        before = _max_comm_id()
+        handle_inbound(phone, text)
+        rows = _comms_after(before)
+        if not rows:
+            print("    (the agent did not send a reply)\n")
+            continue
+        for r in rows:
+            print(f"\n  agent -> {r['audience_role']}:")
+            for line in r["body"].splitlines():
+                print(f"      {line}")
+        print()
+
+
 def _cmd_listen() -> None:
     from orchestrator import listen
     listen()
@@ -151,6 +199,8 @@ def main() -> None:
             print('Usage: python main.py simulate <phone> "<text>" [--media]')
             return
         _cmd_simulate(sys.argv[2], sys.argv[3], has_media="--media" in sys.argv)
+    elif cmd == "chat":
+        _cmd_chat(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "listen":
         _cmd_listen()
     else:

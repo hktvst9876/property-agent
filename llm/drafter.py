@@ -28,7 +28,8 @@ def _model_available() -> bool:
 def draft_message(audience_role: str, verdict: str, reason: str, *,
                   context: dict | None = None,
                   legal: dict | None = None,
-                  inbound_message: str | None = None) -> dict:
+                  inbound_message: str | None = None,
+                  recipient_name: str | None = None) -> dict:
     """
     Returns {"subject", "body"}.
 
@@ -38,14 +39,18 @@ def draft_message(audience_role: str, verdict: str, reason: str, *,
     legal:            optional core.legal_guard.surface() output (disclaimer + sources)
     inbound_message:  the recipient's own latest message, so the model can read mood.
                       None when we're reaching out proactively (e.g. a sweep).
+    recipient_name:   the recipient's actual name, so the greeting is personal and the
+                      model never writes a bracketed placeholder like "[Landlord]".
     """
     audience_role = audience_role if audience_role in AUDIENCE_TONE else "other"
 
     if not _model_available():
-        return _fallback(audience_role, verdict, reason, context, legal, inbound_message)
+        return _fallback(audience_role, verdict, reason, context, legal,
+                         inbound_message, recipient_name)
 
     payload = {
         "recipient": audience_role,
+        "recipient_name": recipient_name,
         "tone": AUDIENCE_TONE[audience_role],
         "verdict": verdict,
         "what_to_communicate": reason,
@@ -64,7 +69,8 @@ def draft_message(audience_role: str, verdict: str, reason: str, *,
         max_tokens=700,
     )
     if "_error" in result or "body" not in result:
-        return _fallback(audience_role, verdict, reason, context, legal, inbound_message)
+        return _fallback(audience_role, verdict, reason, context, legal,
+                         inbound_message, recipient_name)
     return result
 
 
@@ -85,17 +91,21 @@ _OPENERS = {
 
 def _fallback(audience_role: str, verdict: str, reason: str,
               context: dict | None, legal: dict | None,
-              inbound_message: str | None = None) -> dict:
+              inbound_message: str | None = None,
+              recipient_name: str | None = None) -> dict:
     from core.intake_parser import sentiment
 
-    greeting = {
-        "tenant": "Hello,",
-        "landlord": "Dear Landlord,",
-        "contractor": "Hello,",
-        "body_corporate": "To whom it may concern,",
-        "council": "To whom it may concern,",
-        "other": "Hello,",
-    }.get(audience_role, "Hello,")
+    if recipient_name:
+        greeting = f"Hello {recipient_name},"
+    else:
+        greeting = {
+            "tenant": "Hello,",
+            "landlord": "Dear Landlord,",
+            "contractor": "Hello,",
+            "body_corporate": "To whom it may concern,",
+            "council": "To whom it may concern,",
+            "other": "Hello,",
+        }.get(audience_role, "Hello,")
 
     # Only mirror mood when writing back to the person who messaged us.
     opener = ""
