@@ -29,7 +29,10 @@ import requests
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db.store import connect, pending_approvals, resolve_approval
+from db.store import (
+    connect, pending_approvals, resolve_approval,
+    unpushed_approvals, mark_approval_pushed,
+)
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -108,13 +111,16 @@ def push_approval(approval: dict) -> None:
 
 
 def push_pending_approvals() -> int:
-    """Push every pending approval. No-op (returns 0) if Telegram isn't configured,
-    so the orchestrator runs fine offline."""
+    """Push pending approvals that haven't been sent yet — each one once, not
+    on every inbound message. /pending in Telegram re-sends everything still
+    open. No-op (returns 0) if Telegram isn't configured, so the orchestrator
+    runs fine offline."""
     if not _telegram_enabled():
         return 0
-    rows = pending_approvals()
+    rows = unpushed_approvals()
     for row in rows:
         push_approval(dict(row))
+        mark_approval_pushed(row["id"])
     return len(rows)
 
 
@@ -133,26 +139,36 @@ def _handle_callback(callback: dict) -> None:
     resolved_by = f"{user.get('username') or user.get('id', 'unknown')}"
 
     try:
-        resolve_approval(approval_id, status, resolved_by)
+        changed = resolve_approval(approval_id, status, resolved_by)
     except Exception as exc:
         _answer_callback(callback["id"], f"Error: {exc}")
         return
 
-    _answer_callback(callback["id"], f"#{approval_id} → {status}")
     msg = callback.get("message", {})
+    if not changed:
+        _answer_callback(callback["id"], f"#{approval_id} was already resolved — no change.")
+        _clear_buttons(msg)
+        return
+
+    _answer_callback(callback["id"], f"#{approval_id} → {status}")
     if msg.get("message_id"):
-        requests.post(
-            f"{API}/editMessageReplyMarkup",
-            json={"chat_id": CHAT_ID, "message_id": msg["message_id"],
-                  "reply_markup": {"inline_keyboard": []}},
-            timeout=10,
-        )
+        _clear_buttons(msg)
         requests.post(
             f"{API}/sendMessage",
             json={"chat_id": CHAT_ID,
                   "text": f"#{approval_id} → *{status}* by `{resolved_by}`",
                   "parse_mode": "Markdown",
                   "reply_to_message_id": msg["message_id"]},
+            timeout=10,
+        )
+
+
+def _clear_buttons(msg: dict) -> None:
+    if msg.get("message_id"):
+        requests.post(
+            f"{API}/editMessageReplyMarkup",
+            json={"chat_id": CHAT_ID, "message_id": msg["message_id"],
+                  "reply_markup": {"inline_keyboard": []}},
             timeout=10,
         )
 
@@ -202,6 +218,7 @@ def _handle_text(message: dict) -> None:
             return
         for row in rows:
             push_approval(dict(row))
+            mark_approval_pushed(row["id"])
     elif text == "/status":
         send_message(_status_summary())
     elif text in ("/start", "/help"):

@@ -13,17 +13,38 @@ DB_PATH = Path(__file__).parent / "property_agent.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+# Columns added after the first release. schema.sql only creates missing
+# tables, so databases created by an older version need these ALTERs.
+_MIGRATIONS = [
+    ("approvals", "pushed_at", "TEXT"),
+]
+_migrated = False
+
+
 def connect() -> sqlite3.Connection:
+    global _migrated
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if not _migrated:
+        _apply_migrations(conn)
+        _migrated = True
     return conn
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    with conn:
+        for table, column, decl in _MIGRATIONS:
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if existing and column not in existing:  # empty = table not created yet
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def init_db() -> None:
     conn = connect()
     with conn:
         conn.executescript(SCHEMA_PATH.read_text())
+    _apply_migrations(conn)
     conn.close()
 
 
@@ -170,14 +191,45 @@ def record_decision(case_id: int, engine: str, verdict: str, reason: str,
 
 
 def queue_approval(action: str, payload: dict, case_id: int | None = None) -> int:
+    """Queue an approval. An identical one (same action, case and payload)
+    that is still pending is returned instead of duplicated, so re-running a
+    sweep doesn't stack copies of the same request."""
+    payload_json = json.dumps(payload, default=str)
+    conn = connect()
+    try:
+        with conn:
+            existing = conn.execute(
+                "SELECT id FROM approvals WHERE status='pending' AND action=? "
+                "AND case_id IS ? AND payload_json=? ORDER BY id LIMIT 1",
+                (action, case_id, payload_json),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            cur = conn.execute(
+                "INSERT INTO approvals (case_id, action, payload_json) VALUES (?, ?, ?)",
+                (case_id, action, payload_json),
+            )
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def unpushed_approvals() -> list[sqlite3.Row]:
+    """Pending approvals not yet sent to Telegram."""
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM approvals WHERE status='pending' AND pushed_at IS NULL "
+        "ORDER BY created_at"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_approval_pushed(approval_id: int) -> None:
     conn = connect()
     with conn:
-        cur = conn.execute(
-            "INSERT INTO approvals (case_id, action, payload_json) VALUES (?, ?, ?)",
-            (case_id, action, json.dumps(payload, default=str)),
-        )
+        conn.execute("UPDATE approvals SET pushed_at=? WHERE id=?", (_now(), approval_id))
     conn.close()
-    return cur.lastrowid
 
 
 def pending_approvals() -> list[sqlite3.Row]:
@@ -189,16 +241,21 @@ def pending_approvals() -> list[sqlite3.Row]:
     return rows
 
 
-def resolve_approval(approval_id: int, status: str, resolved_by: str) -> None:
+def resolve_approval(approval_id: int, status: str, resolved_by: str) -> bool:
+    """Approve or reject a PENDING approval. Returns False if it was already
+    resolved (e.g. a tap on a stale duplicate Telegram message), so a decision
+    can't be silently flipped afterwards."""
     if status not in ("approved", "rejected"):
         raise ValueError(f"invalid status {status!r}")
     conn = connect()
     with conn:
-        conn.execute(
-            "UPDATE approvals SET status=?, resolved_at=?, resolved_by=? WHERE id=?",
+        cur = conn.execute(
+            "UPDATE approvals SET status=?, resolved_at=?, resolved_by=? "
+            "WHERE id=? AND status='pending'",
             (status, _now(), resolved_by, approval_id),
         )
     conn.close()
+    return cur.rowcount == 1
 
 
 def record_complaint(case_id: int, complainant_party_id: int, category: str,

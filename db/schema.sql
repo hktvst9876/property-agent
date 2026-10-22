@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     status        TEXT DEFAULT 'pending',        -- pending|approved|rejected|executed
     created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
     resolved_at   TEXT,
-    resolved_by   TEXT
+    resolved_by   TEXT,
+    pushed_at     TEXT                           -- when it was sent to Telegram (dedupes pushes)
 );
 
 -- Complaints. complainant_party_id is NEVER surfaced to other parties when
